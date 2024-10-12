@@ -1,0 +1,431 @@
+From 678287992eadedab99bae38229a7bec9b9a377fe Mon Sep 17 00:00:00 2001
+From: aravindlal <aravindlal.mh@adlinktech.com>
+Date: Wed, 26 Jun 2024 12:51:48 +0530
+Subject: [PATCH] mxa switch gpio support
+
+---
+ drivers/gpio/Kconfig       |   5 +
+ drivers/gpio/Makefile      |   1 +
+ drivers/gpio/gpio-switch.c | 385 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 391 insertions(+)
+ create mode 100644 drivers/gpio/gpio-switch.c
+
+diff --git a/drivers/gpio/Kconfig b/drivers/gpio/Kconfig
+index 52b717954173..37668845436d 100644
+--- a/drivers/gpio/Kconfig
++++ b/drivers/gpio/Kconfig
+@@ -417,6 +417,11 @@ config GPIO_MPC8XXX
+ 	  Say Y here if you're going to use hardware that connects to the
+ 	  MPC512x/831x/834x/837x/8572/8610/QorIQ GPIOs.
+ 
++config MXA_SWITCH_GPIO
++	tristate "GPIO MXA SWITCH SUPPORT"
++	help
++	say y here to support mxa switch gpio support
++
+ config GPIO_MT7621
+ 	bool "Mediatek MT7621 GPIO Support"
+ 	depends on SOC_MT7620 || SOC_MT7621 || COMPILE_TEST
+diff --git a/drivers/gpio/Makefile b/drivers/gpio/Makefile
+index 1fc803d29026..87b81d6521a6 100644
+--- a/drivers/gpio/Makefile
++++ b/drivers/gpio/Makefile
+@@ -187,3 +187,4 @@ obj-$(CONFIG_GPIO_XRA1403)		+= gpio-xra1403.o
+ obj-$(CONFIG_GPIO_XTENSA)		+= gpio-xtensa.o
+ obj-$(CONFIG_GPIO_ZEVIO)		+= gpio-zevio.o
+ obj-$(CONFIG_GPIO_ZYNQ)			+= gpio-zynq.o
++obj-$(CONFIG_MXA_SWITCH_GPIO)		+= gpio-switch.o
+diff --git a/drivers/gpio/gpio-switch.c b/drivers/gpio/gpio-switch.c
+new file mode 100644
+index 000000000000..ec174c173afa
+--- /dev/null
++++ b/drivers/gpio/gpio-switch.c
+@@ -0,0 +1,385 @@
++/* Copyright (C) 2018 AdlinkTech, Inc.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ */
++
++#include <linux/module.h>
++#include <linux/device.h>
++#include <linux/init.h>
++#include <linux/fs.h>
++#include <linux/sched.h>
++#include <linux/pm.h>
++#include <linux/slab.h>
++#include <linux/sysctl.h>
++#include <linux/proc_fs.h>
++#include <linux/delay.h>
++#include <linux/platform_device.h>
++#include <linux/gpio.h>
++#include <linux/of_platform.h>
++#include <linux/of_gpio.h>
++#include <linux/sysfs.h>
++#include <linux/delay.h>
++#include <linux/interrupt.h>
++#include <linux/string.h>
++#include <linux/kernel.h>
++#include <linux/mutex.h>
++#include <linux/sysfs.h>
++#include <linux/fs.h>
++#include <linux/file.h> 
++#include <asm/uaccess.h>
++#include <linux/buffer_head.h>
++
++#define OUTPUT_H	1
++#define OUTPUT_L	0
++#define SET_OUTPUT(value,reverse)		((reverse==0)?value:((~value)&0x1))
++#define	GET_INPUT(value,reverse)		((reverse==0)?value:((~value)&0x1))
++#define UART_CONFIG	"/etc/uartConfig"
++
++static int usbMux,com1Mode,com2Mode,hwid,hwid1,hwid2,hwid3,hub_reset,com1_mode0,com1_mode1,com2_mode0,com2_mode1;
++static char *ComRS232="RS232",*ComRS422="RS422",*ComRS485="RS485";
++static char *Com1Mode,*Com2Mode;
++
++static void strcpytoupper(char *t,char *s){
++    int idx;
++    for (idx = 0; s[idx]!='\0'; idx++) {
++        if(s[idx] >= 'a' && s[idx] <= 'z') {
++            t[idx] = s[idx] -32;
++        } else {
++            t[idx] = s[idx];
++        }
++    }
++}
++
++void writeToCfg(void)
++{
++    struct file *fp;
++    char data[3]={0};
++    loff_t pos=0;
++    fp = filp_open(UART_CONFIG,O_CREAT|O_RDWR,0664);
++    if (fp!=NULL){
++        sprintf(data,"%d%d",com1Mode,com2Mode);
++	kernel_write(fp,(void *)data,2,&pos);
++	filp_close(fp,NULL);
++    }
++}
++
++static ssize_t HWID_show(struct class *c,
++                                struct class_attribute *attr,
++                                char *data)
++{
++        return sprintf(data,"%d",hwid);
++}
++
++static ssize_t hubReset_store(struct class *cls,
++                                struct class_attribute *attr,
++                                const char *buf, size_t count)
++{
++        int ret;
++        int setValue;
++
++        /* get user data */
++        ret = kstrtoint(buf,10,&setValue);
++        if(setValue!=1){
++                printk("Invalid value, only set 1 support\n");
++                return -EINVAL;
++        }
++
++        gpio_set_value(hub_reset,1);
++	msleep(5);
++	gpio_set_value(hub_reset,0);
++	msleep(5);
++	gpio_set_value(hub_reset,1);
++
++        return count;
++}
++
++static ssize_t com1Mode_show(struct class *c,
++                                struct class_attribute *attr,
++                                char *data)
++{
++        com1Mode = (gpio_get_value(com1_mode0)<<0)+(gpio_get_value(com1_mode1)<<1);
++
++        return sprintf(data,"%s",(com1Mode==1)?ComRS232:((com1Mode==2)?ComRS485:ComRS422));
++}
++
++static ssize_t com1Mode_store(struct class *cls,
++                                struct class_attribute *attr,
++                                const char *buf, size_t count)
++{
++	char tmp[10];
++
++	strcpytoupper(tmp,(char *)buf);
++	if(strncmp(tmp,"RS232",5)==0){
++	    gpio_set_value(com1_mode0,1);
++	    gpio_set_value(com1_mode1,0);
++      	    Com1Mode=ComRS232;
++	} else if(strncmp(tmp,"RS485",5)==0){
++	    gpio_set_value(com1_mode0,0);
++	    gpio_set_value(com1_mode1,1);
++	    Com1Mode=ComRS485;
++	} else if(strncmp(tmp,"RS422",5)==0){
++	    gpio_set_value(com1_mode0,1);
++	    gpio_set_value(com1_mode1,1);
++	    Com1Mode=ComRS422;
++	} else {
++	   printk("Ivalid string value, only RS232/RS485/RS422 support\n");
++	    return -EINVAL;
++        }
++	com1Mode = (gpio_get_value(com1_mode0)<<0)+(gpio_get_value(com1_mode1)<<1);
++ 	writeToCfg();
++        return count;
++}
++
++static ssize_t com2Mode_show(struct class *c,
++                                struct class_attribute *attr,
++                                char *data)
++{
++        com2Mode = (gpio_get_value(com2_mode0)<<0)+(gpio_get_value(com2_mode1)<<1);
++
++        return sprintf(data,"%s",(com2Mode==1)?ComRS232:((com2Mode==2)?ComRS485:ComRS422));
++}
++
++static ssize_t com2Mode_store(struct class *cls,
++                                struct class_attribute *attr,
++                                const char *buf, size_t count)
++{
++	char tmp[10];
++	strcpytoupper(tmp,(char *)buf);
++        if(strncmp(tmp,"RS232",5)==0){
++            gpio_set_value(com2_mode0,1);
++            gpio_set_value(com2_mode1,0);
++            Com2Mode=ComRS232;
++        } else if(strncmp(tmp,"RS485",5)==0){
++            gpio_set_value(com2_mode0,0);
++            gpio_set_value(com2_mode1,1);
++            Com2Mode=ComRS485;
++        } else if(strncmp(tmp,"RS422",5)==0){
++            gpio_set_value(com2_mode0,1);
++            gpio_set_value(com2_mode1,1);
++            Com2Mode=ComRS422;
++        } else {
++            printk("Ivalid string value, only RS232/RS485/RS422 support\n");
++            return -EINVAL;
++        }
++        com2Mode = (gpio_get_value(com2_mode0)<<0)+(gpio_get_value(com2_mode1)<<1);
++        writeToCfg();
++	return count;
++}
++
++static CLASS_ATTR_RO(HWID);
++static CLASS_ATTR_WO(hubReset);
++static CLASS_ATTR_RW(com1Mode);
++static CLASS_ATTR_RW(com2Mode);
++
++static struct attribute *gpio_switch_attrs[] = {
++	&class_attr_HWID.attr,
++    &class_attr_hubReset.attr,
++    &class_attr_com1Mode.attr,
++    &class_attr_com2Mode.attr,
++	NULL,
++};
++
++ATTRIBUTE_GROUPS(gpio_switch);
++
++void gpio_switch_attrs_release(struct class *cls)
++{
++	kfree(cls);
++}
++
++struct class gpio_switch_class = {
++        .name =         "gpio_switch",
++        .owner =        THIS_MODULE,
++        .class_release = gpio_switch_attrs_release,
++	.class_groups = gpio_switch_groups,
++};
++
++
++static const struct of_device_id gpio_switch_of_match[] = {
++	{ .compatible = "mxa,gpio_switch", },
++	{ },
++};
++MODULE_DEVICE_TABLE(of, gpio_switch_of_match);
++
++static int gpio_switch_probe(struct platform_device *pdev)
++{
++	int ret;
++    u8 hub_mode;			
++    hub_mode = of_property_read_bool(pdev->dev.of_node, "usb-hub-enable");
++    usbMux = of_get_named_gpio(pdev->dev.of_node,"usb-mux-gpios",0);
++    if(!gpio_is_valid(usbMux)){
++        printk("GET usb-mux-gpios ERROR\n");
++    } else {
++        gpio_free(usbMux);
++        ret = gpio_request(usbMux,"usb_mux");
++        if(ret != 0){
++            printk("[%s] usb_mux request error!\n",__FUNCTION__);
++            return -1;
++        }
++        if(hub_mode){
++            gpio_direction_output(usbMux,1);
++        } else {
++            gpio_direction_output(usbMux,0);
++        }
++    }
++	hub_reset = of_get_named_gpio(pdev->dev.of_node,"hub-reset-gpios",0);
++	if(!gpio_is_valid(hub_reset)){
++            printk("GET hub-reset-gpios ERROR\n");
++	    return -1;
++	} else {
++            gpio_free(hub_reset);
++            ret = gpio_request(hub_reset,"hub_reset");
++            if(ret != 0){
++                printk("[%s] hub_reset request error!\n",__FUNCTION__);
++ 	 	return -1;
++            }
++	    gpio_direction_output(hub_reset,1);
++	}
++    
++    hwid1 = of_get_named_gpio(pdev->dev.of_node,"hwid1-gpios",0);
++    if(!gpio_is_valid(hwid1)){
++        printk("GET hwid1-gpios ERROR\n");
++    } else {
++        gpio_free(hwid1);
++        ret = gpio_request(hwid1,"hwid1");
++        if(ret != 0){
++            printk("[%s] hwid1 request error!\n",__FUNCTION__);
++            return -1;
++        }
++        gpio_direction_input(hwid1);
++	    hwid += (gpio_get_value(hwid1)<<0);
++	}
++    hwid2 = of_get_named_gpio(pdev->dev.of_node,"hwid2-gpios",0);
++    if(!gpio_is_valid(hwid2)){
++        printk("GET hwid2-gpios ERROR\n");
++    } else {
++        gpio_free(hwid2);
++        ret = gpio_request(hwid2,"hwid2");
++        if(ret != 0){
++            printk("[%s] hwid2 request error!\n",__FUNCTION__);
++            return -1;
++        }
++        gpio_direction_input(hwid2);
++        hwid += (gpio_get_value(hwid2)<<1);
++	}
++#if 0    //reserve this pin for future use
++    hwid3 = of_get_named_gpio(pdev->dev.of_node,"hwid3-gpios",0);
++    if(!gpio_is_valid(hwid3)){
++        printk("GET hwid3-gpios ERROR\n");
++    } else {
++        gpio_free(hwid3);
++        ret = gpio_request(hwid3,"hwid3");
++        if(ret != 0){
++            printk("[%s] hwid3 request error!\n",__FUNCTION__);
++            return -1;
++        }
++        gpio_direction_input(hwid3);
++        hwid += (gpio_get_value(hwid3)<<2);
++    }
++#endif  
++    com1_mode0 = of_get_named_gpio(pdev->dev.of_node,"com1-mode0-gpios",0);
++    if(!gpio_is_valid(com1_mode0)){
++        printk("GET com1-mode0-gpios ERROR\n");
++    } else {
++        gpio_free(com1_mode0);
++        ret = gpio_request(com1_mode0,"Com1Mode0");
++        if(ret != 0){
++            printk("[%s] com1_mode0 request error!\n",__FUNCTION__);
++            return -1;
++        }
++        gpio_direction_output(com1_mode0,1);
++        com1Mode += (gpio_get_value(com1_mode0)<<0);
++    }
++    com1_mode1 = of_get_named_gpio(pdev->dev.of_node,"com1-mode1-gpios",0);
++    if(!gpio_is_valid(com1_mode1)){
++        printk("GET com1-mode1-gpios ERROR\n");
++    } else {
++        gpio_free(com1_mode1);
++        ret = gpio_request(com1_mode1,"Com1Mode1");
++        if(ret != 0){
++            printk("[%s] com1_mode1 request error!\n",__FUNCTION__);
++            return -1;
++        }
++        gpio_direction_output(com1_mode1,0);
++        com1Mode += (gpio_get_value(com1_mode1)<<1);
++    }
++    com2_mode0 = of_get_named_gpio(pdev->dev.of_node,"com2-mode0-gpios",0);
++    if(!gpio_is_valid(com2_mode0)){
++        printk("GET com2-mode0-gpios ERROR\n");
++    } else {
++        gpio_free(com2_mode0);
++        ret = gpio_request(com2_mode0,"Com2Mode0");
++        if(ret != 0){
++            printk("[%s] com2_mode0 request error!\n",__FUNCTION__);
++            return -1;
++        }
++        gpio_direction_output(com2_mode0,1);
++        com2Mode += (gpio_get_value(com2_mode0)<<0);
++    }
++    com2_mode1 = of_get_named_gpio(pdev->dev.of_node,"com2-mode1-gpios",0);
++    if(!gpio_is_valid(com2_mode1)){
++        printk("GET com2-mode1-gpios ERROR\n");
++    } else {
++        gpio_free(com2_mode1);
++        ret = gpio_request(com2_mode1,"Com2Mode1");
++        if(ret != 0){
++            printk("[%s] com2_mode1 request error!\n",__FUNCTION__);
++            return -1;
++        }
++        gpio_direction_output(com2_mode1,0);
++        com2Mode += (gpio_get_value(com2_mode1)<<1);
++    }
++	Com1Mode = ComRS232;
++	Com2Mode = ComRS232;
++
++	class_register(&gpio_switch_class);
++    
++	return 0;
++}
++
++static int gpio_switch_remove(struct platform_device *pdev)
++{
++    gpio_free(usbMux);
++    gpio_free(hub_reset);
++    gpio_free(hwid1);
++    gpio_free(hwid2);
++    gpio_free(com1_mode0);
++    gpio_free(com1_mode1);
++    gpio_free(com2_mode0);
++    gpio_free(com2_mode1);
++    class_unregister(&gpio_switch_class);
++	return 0;
++}
++
++
++static struct platform_driver gpio_switch_driver = {
++
++	.probe		= gpio_switch_probe,
++	.remove		= gpio_switch_remove,
++	.driver		= {
++		.name	= "gpio_switch",
++		.of_match_table = of_match_ptr(gpio_switch_of_match),
++	}
++};
++
++
++
++static int __init gpio_switch_init(void)
++{	
++	return platform_driver_register(&gpio_switch_driver);
++}
++
++static void __exit gpio_switch_exit(void)
++{		
++	platform_driver_unregister(&gpio_switch_driver);
++}
++
++module_init(gpio_switch_init);
++module_exit(gpio_switch_exit);
++
++//MODULE_AUTHOR("AdlinkTech, Inc.");
++//MODULE_DESCRIPTION("MXA-200 gpio control driver");
++MODULE_LICENSE("GPL");
++//MODULE_VERSION("0.1");
++//MODULE_ALIAS("platform:gpio_switch");
+-- 
+2.25.1
+

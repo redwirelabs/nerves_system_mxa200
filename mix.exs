@@ -97,10 +97,17 @@ defmodule NervesSystemMXA200.MixProject do
       "LICENSE",
       "README.md",
       "VERSION",
+      "assets/images",
+      "fwup-ops.conf",
       "fwup.conf",
       "fwup_include",
+      "linux",
       "mix.exs",
-      "nerves_defconfig"
+      "nerves_defconfig",
+      "post-build.sh",
+      "post-createfs.sh",
+      "rootfs_overlay",
+      "uboot"
     ]
   end
 
