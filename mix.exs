@@ -64,6 +64,7 @@ defmodule NervesSystemMXA200.MixProject do
       {:nerves, "~> 1.11", runtime: false},
       {:nerves_system_br, "1.29.0", runtime: false},
       {:nerves_system_linter, "~> 0.4", only: [:dev, :test], runtime: false},
+      {:nerves_toolchain_aarch64_nerves_linux_gnu, "~> 14.2.0", runtime: false},
       {:ex_doc, "~> 0.34", only: :docs, runtime: false}
     ]
   end
