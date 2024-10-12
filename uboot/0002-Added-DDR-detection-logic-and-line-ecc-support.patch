@@ -1,0 +1,255 @@
+From 6e425293217fdcee58ecf800753e4d594146dd6b Mon Sep 17 00:00:00 2001
+From: Dinesh kumar <dinesh.v@adlinktech.com>
+Date: Mon, 10 Jun 2024 15:04:19 +0530
+Subject: [PATCH 2/2] Added DDR detection logic and line ecc support
+
+---
+ arch/arm/include/asm/arch-imx8m/ddr.h |  7 ++-
+ arch/arm/mach-imx/imx8m/Kconfig       |  7 +++
+ arch/arm/mach-imx/imx8m/soc.c         | 91 ++++++++++++++++++++++++++-
+ drivers/ddr/imx/imx8m/ddr_init.c      | 30 ++++++++-
+ 4 files changed, 130 insertions(+), 5 deletions(-)
+
+diff --git a/arch/arm/include/asm/arch-imx8m/ddr.h b/arch/arm/include/asm/arch-imx8m/ddr.h
+index 5e4fbecf052..b3d3f46f2b8 100644
+--- a/arch/arm/include/asm/arch-imx8m/ddr.h
++++ b/arch/arm/include/asm/arch-imx8m/ddr.h
+@@ -701,8 +701,11 @@ struct dram_timing_info {
+ 	/* initialized drate table */
+ 	unsigned int fsp_table[4];
+ };
+-
+ extern struct dram_timing_info dram_timing;
++extern struct dram_timing_info dram_timing_2G;
++extern struct dram_timing_info dram_timing_4G;
++extern struct dram_timing_info dram_timing_6G;
++extern struct dram_timing_info dram_timing_8G;
+ 
+ void ddr_load_train_firmware(enum fw_type type);
+ int ddr_init(struct dram_timing_info *timing_info);
+@@ -711,6 +714,8 @@ void load_lpddr4_phy_pie(void);
+ void ddrphy_trained_csr_save(struct dram_cfg_param *param, unsigned int num);
+ void dram_config_save(struct dram_timing_info *info, unsigned long base);
+ void board_dram_ecc_scrub(void);
++void board_dram_ecc_scrub_2g(void);
++void board_dram_ecc_scrub_4g(void);
+ void ddrc_inline_ecc_scrub(unsigned int start_address,
+ 			   unsigned int range_address);
+ void ddrc_inline_ecc_scrub_end(unsigned int start_address,
+diff --git a/arch/arm/mach-imx/imx8m/Kconfig b/arch/arm/mach-imx/imx8m/Kconfig
+index a225a9784f4..b9e3f749067 100644
+--- a/arch/arm/mach-imx/imx8m/Kconfig
++++ b/arch/arm/mach-imx/imx8m/Kconfig
+@@ -231,6 +231,12 @@ config TARGET_IMX8MN_VENICE
+ 	select SUPPORT_SPL
+ 	select IMX8M_LPDDR4
+ 
++config TARGET_MXA_200
++	bool "Adlink MXA-200 gateway board"
++	select IMX8MP
++	select SUPPORT_SPL
++	select IMX8M_LPDDR4
++
+ config TARGET_IMX8MP_EVK
+ 	bool "imx8mp LPDDR4 EVK board"
+ 	select IMX8MP
+@@ -366,5 +372,6 @@ source "board/technexion/pico-imx8mq/Kconfig"
+ source "board/variscite/imx8mn_var_som/Kconfig"
+ source "board/toradex/verdin-imx8mm/Kconfig"
+ source "board/toradex/verdin-imx8mp/Kconfig"
++source "board/adlink/mxa-200/Kconfig"
+ 
+ endif
+diff --git a/arch/arm/mach-imx/imx8m/soc.c b/arch/arm/mach-imx/imx8m/soc.c
+index 0d2f7a5897f..d74f8cf93c1 100644
+--- a/arch/arm/mach-imx/imx8m/soc.c
++++ b/arch/arm/mach-imx/imx8m/soc.c
+@@ -43,6 +43,21 @@ struct imx_sec_config_fuse_t const imx_sec_config_fuse = {
+ };
+ #endif
+ 
++#define GPIO4_DR_ADDR	0x30230000
++#define GPIO5_DR_ADDR	0x30240000
++#define SKU_CFG1	5
++#define SKU_CFG2	31
++
++int get_dram_sku(void)
++{
++	int dram_sku,dram_sku_cfg1,dram_sku_cfg2;
++
++	dram_sku_cfg1 = ((readl(GPIO5_DR_ADDR) >> SKU_CFG1) & (0x1));
++	dram_sku_cfg2 = ((readl(GPIO4_DR_ADDR) >> SKU_CFG2) & (0x1));
++	dram_sku=((dram_sku_cfg1 <<0)|(dram_sku_cfg2<<1));
++	return dram_sku;
++}
++
+ int timer_init(void)
+ {
+ #ifdef CONFIG_SPL_BUILD
+@@ -188,9 +203,48 @@ static unsigned int imx8m_find_dram_entry_in_mem_map(void)
+ {
+ 	int i;
+ 
+-	for (i = 0; i < ARRAY_SIZE(imx8m_mem_map); i++)
+-		if (imx8m_mem_map[i].phys == CONFIG_SYS_SDRAM_BASE)
++	for (i = 0; i < ARRAY_SIZE(imx8m_mem_map); i++){
++		if (imx8m_mem_map[i].phys == CONFIG_SYS_SDRAM_BASE){
++			/* resetup dram size by sku */
++			switch (get_dram_sku()){
++				case 3:	//2GB
++#ifdef CONFIG_IMX8M_DRAM_INLINE_ECC
++					imx8m_mem_map[i].size = 0x70000000;
++#else
++                    imx8m_mem_map[i].size = 0x80000000;
++#endif
++					break;
++				case 2:  //4GB
++#ifdef CONFIG_IMX8M_DRAM_INLINE_ECC
++                    imx8m_mem_map[i].size = 0xB0000000;
++                    imx8m_mem_map[i+1].size = 0x0;
++#else
++					imx8m_mem_map[i].size = 0xC0000000;
++					imx8m_mem_map[i+1].size = 0x40000000;
++#endif                    
++					break;
++				case 1:	//6GB
++#ifdef CONFIG_IMX8M_DRAM_INLINE_ECC
++                    imx8m_mem_map[i].size = 0xC0000000;
++                    imx8m_mem_map[i+1].size = 0x90000000;
++#else
++					imx8m_mem_map[i].size = 0xC0000000;
++					imx8m_mem_map[i+1].size = 0xC0000000;
++#endif                    
++					break;
++				case 0:	//8G
++#ifdef CONFIG_IMX8M_DRAM_INLINE_ECC
++                    imx8m_mem_map[i].size = 0xC0000000;
++                    imx8m_mem_map[i+1].size = 0x100000000;
++#else
++					imx8m_mem_map[i].size = 0xC0000000;
++					imx8m_mem_map[i+1].size = 0x140000000;
++#endif                    
++					break;
++			}
+ 			return i;
++		}
++	}
+ 
+ 	hang();	/* Entry not found, this must never happen. */
+ }
+@@ -231,10 +285,43 @@ __weak int board_phys_sdram_size(phys_size_t *size)
+ 	if (!size)
+ 		return -EINVAL;
+ 
++#if 0
+ 	*size = PHYS_SDRAM_SIZE;
+ 
+ #ifdef PHYS_SDRAM_2_SIZE
+ 	*size += PHYS_SDRAM_2_SIZE;
++#endif
++#else
++	switch (get_dram_sku()) {
++		case 3: //2GB
++#ifdef CONFIG_IMX8M_DRAM_INLINE_ECC
++			*size = 0x70000000;
++#else
++			*size = 0x80000000;
++#endif			
++			break;
++		case 2:	//4GB
++#ifdef CONFIG_IMX8M_DRAM_INLINE_ECC
++			*size = 0xE0000000;
++#else
++			*size = 0x100000000;
++#endif			
++			break;
++		case 1: //6GB
++#ifdef CONFIG_IMX8M_DRAM_INLINE_ECC
++			*size = 0x150000000;
++#else
++			*size = 0x180000000;
++#endif			
++			break;
++		case 0:	//8GB
++#ifdef CONFIG_IMX8M_DRAM_INLINE_ECC
++			*size = 0x1C0000000;
++#else
++			*size = 0x200000000;
++#endif			
++			break;
++	}
+ #endif
+ 	return 0;
+ }
+diff --git a/drivers/ddr/imx/imx8m/ddr_init.c b/drivers/ddr/imx/imx8m/ddr_init.c
+index d64edc57be0..3d033026bde 100644
+--- a/drivers/ddr/imx/imx8m/ddr_init.c
++++ b/drivers/ddr/imx/imx8m/ddr_init.c
+@@ -10,12 +10,16 @@
+ #include <asm/arch/ddr.h>
+ #include <asm/arch/clock.h>
+ #include <asm/arch/sys_proto.h>
++#include <asm/gpio.h>
+ 
+ static unsigned int g_cdd_rr_max[4];
+ static unsigned int g_cdd_rw_max[4];
+ static unsigned int g_cdd_wr_max[4];
+ static unsigned int g_cdd_ww_max[4];
+ 
++#define SKU_CONFIG1		IMX_GPIO_NR(5, 5)
++#define SKU_CONFIG2		IMX_GPIO_NR(4, 31)
++
+ void ddr_cfg_umctl2(struct dram_cfg_param *ddrc_cfg, int num)
+ {
+ 	int i = 0;
+@@ -96,6 +100,14 @@ void __weak board_dram_ecc_scrub(void)
+ {
+ }
+ 
++void __weak board_dram_ecc_scrub_2g(void)
++{
++}
++
++void __weak board_dram_ecc_scrub_4g(void)
++{
++}
++
+ void lpddr4_mr_write(unsigned int mr_rank, unsigned int mr_addr,
+ 		     unsigned int mr_data)
+ {
+@@ -303,8 +315,9 @@ int ddr_init(struct dram_timing_info *dram_timing)
+ {
+ 	unsigned int tmp, initial_drate, target_freq;
+ 	int ret;
++	int dram_sku = gpio_get_value(SKU_CONFIG1)<<0 | gpio_get_value(SKU_CONFIG2)<<1;
+ 
+-	printf("DDRINFO: start DRAM init\n");
++	printf("DDRINFO: start DRAM init: %d\n",dram_sku);
+ 
+ 	/* Step1: Follow the power up procedure */
+ 	if (is_imx8mq()) {
+@@ -449,7 +462,20 @@ int ddr_init(struct dram_timing_info *dram_timing)
+ 	reg32_write(DDRC_PCTRL_0(0), 0x00000001);
+ 	printf("DDRINFO: ddrmix config done\n");
+ 
+-	board_dram_ecc_scrub();
++	//board_dram_ecc_scrub();
++	switch(dram_sku){
++		case 3:	//2GB
++ 			board_dram_ecc_scrub_2g();
++			break;
++	    case 2:	//4GB
++ 			board_dram_ecc_scrub_4g();
++			break;
++	    case 1:	//6GB
++ 			board_dram_ecc_scrub_4g();
++			break;
++		case 0:	//8G
++ 			board_dram_ecc_scrub_4g();
++	}
+ 
+ 	/* enable selfref_en by default */
+ 	setbits_le32(DDRC_PWRCTL(0), 0x1);
+-- 
+2.25.1
+
