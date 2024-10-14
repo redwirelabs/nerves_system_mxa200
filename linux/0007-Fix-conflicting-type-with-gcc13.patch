@@ -1,0 +1,25 @@
+From 7a5e14f28a700d6208f146fdd6856c1c324b6053 Mon Sep 17 00:00:00 2001
+From: abelino <abelino.romo@gmail.com>
+Date: Tue, 8 Oct 2024 14:30:56 -0700
+Subject: [PATCH] Fix conflicting type with gcc13
+
+---
+ drivers/mxc/gpu-viv/hal/os/linux/kernel/gc_hal_kernel_linux.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/mxc/gpu-viv/hal/os/linux/kernel/gc_hal_kernel_linux.h b/drivers/mxc/gpu-viv/hal/os/linux/kernel/gc_hal_kernel_linux.h
+index a436edb11d9a..43beb7a06f73 100644
+--- a/drivers/mxc/gpu-viv/hal/os/linux/kernel/gc_hal_kernel_linux.h
++++ b/drivers/mxc/gpu-viv/hal/os/linux/kernel/gc_hal_kernel_linux.h
+@@ -318,7 +318,7 @@ _ConvertLogical2Physical(
+     OUT gctPHYS_ADDR_T * Physical
+     );
+ 
+-gctBOOL
++gceSTATUS
+ _QuerySignal(
+     IN gckOS Os,
+     IN gctSIGNAL Signal
+-- 
+2.46.2
+
